@@ -11,12 +11,25 @@ const xss = require('xss-clean');
 const rateLimit = require('express-rate-limit');
 const hpp = require('hpp');
 const cors = require('cors');
+const getPort = require('get-port');
 
 const errorHandler = require('./middleware/error');
 const DBConnection = require('./config/db');
 
 // Load environment variables
 dotenv.config({ path: './config/.env' });
+
+// Validate environment variables
+const validateEnv = () => {
+    const requiredVars = ['MONGO_URI', 'JWT_SECRET'];
+    requiredVars.forEach((envVar) => {
+        if (!process.env[envVar]) {
+            console.error(`Missing environment variable: ${envVar}`.red);
+            process.exit(1); // Exit process if required variables are missing
+        }
+    });
+};
+validateEnv();
 
 // Connect to database
 DBConnection();
@@ -33,15 +46,14 @@ const subscriptionRoutes = require('./routes/subscriptions');
 const historiesRoutes = require('./routes/histories');
 const searchRoutes = require('./routes/search');
 
+// Initialize express app
 const app = express();
 
-// Body parser
-app.use(express.json());
+// Middleware
+app.use(express.json()); // Body parser
+app.use(cookieParser()); // Cookie parser
 
-// Cookie parser
-app.use(cookieParser());
-
-// Dev logging middleware
+// Logging middleware for development
 if (process.env.NODE_ENV === 'development') {
     app.use(morgan('dev'));
 }
@@ -53,7 +65,7 @@ app.use(
     })
 );
 
-// Sanitize data
+// Sanitize data to prevent NoSQL injection
 app.use(mongoSanitize());
 
 // Set security headers
@@ -75,12 +87,13 @@ app.use(limiter);
 // Prevent HTTP param pollution
 app.use(hpp());
 
-// Set static folder
+// Serve static files
 app.use(express.static(path.join(__dirname, 'public')));
 
 // API versioning
 const versionOne = (routeName) => `/api/v1/${routeName}`;
 
+// Mount routes
 app.use(versionOne('auth'), authRoutes);
 app.use(versionOne('users'), userRoutes);
 app.use(versionOne('categories'), categoryRoutes);
@@ -92,20 +105,44 @@ app.use(versionOne('subscriptions'), subscriptionRoutes);
 app.use(versionOne('histories'), historiesRoutes);
 app.use(versionOne('search'), searchRoutes);
 
-// Error handler
+// Error handler middleware
 app.use(errorHandler);
 
-const PORT = process.env.PORT || 5000;
+// Dynamic port assignment
+(async () => {
+    const PORT = await getPort({ port: parseInt(process.env.PORT, 10) || 5000 });
 
-const server = app.listen(PORT, () => {
-    console.log(
-        `We are live in ${process.env.NODE_ENV} mode on port ${PORT}`.yellow.bold
-    );
-});
+    const server = app.listen(PORT, () => {
+        console.log(
+            `Server running in ${process.env.NODE_ENV} mode on port ${PORT}`.yellow.bold
+        );
+    });
 
-// Handle unhandled promise rejections
-process.on('unhandledRejection', (err, promise) => {
-    console.log(`Error: ${err.message}`.red);
-    // Close server & exit process
-    server.close(() => process.exit(1));
-});
+    // Handle unhandled promise rejections
+    process.on('unhandledRejection', (err) => {
+        console.error(`Unhandled Rejection: ${err.message}`.red);
+        server.close(() => process.exit(1));
+    });
+
+    // Graceful shutdown for termination signals
+    const shutdownHandler = (signal) => {
+        console.log(`${signal} received: shutting down gracefully.`.yellow);
+        server.close(() => {
+            console.log('Server closed.'.green);
+            process.exit(0);
+        });
+    };
+
+    process.on('SIGTERM', shutdownHandler);
+    process.on('SIGINT', shutdownHandler);
+
+    // Handle server errors
+    server.on('error', (err) => {
+        if (err.code === 'EADDRINUSE') {
+            console.error(`Port ${PORT} is already in use.`.red);
+            process.exit(1);
+        } else {
+            console.error(`Server error: ${err.message}`.red);
+        }
+    });
+})();
